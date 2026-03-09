@@ -58,7 +58,7 @@ def safe_click(webBot, selector, by, waiting_time=3000, ensure_visible=False, en
 
     try:
         el.click()
-    except ElementClickInterceptedException:
+    except Exception:
         webBot.driver.execute_script("document.body.click();")
         webBot.wait(300)
         webBot.driver.execute_script("arguments[0].click();", el)
@@ -83,6 +83,8 @@ def clicar_dropdown_periodo(webBot):
     """
     Abre o dropdown de período independente do texto exibido.
     Usa contains() para tolerar classes CSS adicionais e variações de texto.
+    ensure_visible=False para retornar None silenciosamente quando não encontrar.
+    except Exception ampliado para capturar StaleElementReferenceException e outros.
     """
     textos_possiveis = [
         '24 Horas',
@@ -97,15 +99,18 @@ def clicar_dropdown_periodo(webBot):
         el = webBot.find_element(
             selector=f"//span[contains(@class,'k-input') and contains(normalize-space(text()),'{texto}')]",
             by=By.XPATH, waiting_time=2000,
-            ensure_visible=True, ensure_clickable=True
+            ensure_visible=False, ensure_clickable=False
         )
         if el is not None:
-            webBot.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", el)
-            webBot.wait(200)
             try:
+                webBot.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", el)
+                webBot.wait(200)
                 el.click()
-            except ElementClickInterceptedException:
-                webBot.driver.execute_script("arguments[0].click();", el)
+            except Exception:
+                try:
+                    webBot.driver.execute_script("arguments[0].click();", el)
+                except Exception:
+                    continue  # elemento ficou stale — tenta o próximo texto
             return True
 
     # Fallback JS
@@ -140,13 +145,16 @@ def selecionar_periodo_ultimo_mes(webBot, log, id_noticia):
         el = webBot.find_element(
             selector="//li[contains(normalize-space(text()), 'Último mês') or contains(normalize-space(text()), 'ltimo m')]",
             by=By.XPATH, waiting_time=2000,
-            ensure_visible=True, ensure_clickable=True
+            ensure_visible=False, ensure_clickable=False
         )
         if el is not None:
             try:
                 el.click()
-            except ElementClickInterceptedException:
-                webBot.driver.execute_script("arguments[0].click();", el)
+            except Exception:
+                try:
+                    webBot.driver.execute_script("arguments[0].click();", el)
+                except Exception:
+                    pass
             return True
 
         # Fallback JS
@@ -247,10 +255,8 @@ def run_bot(df: pd.DataFrame, log_box, usuario: str, senha: str, campo_id_map: d
     # ══════════════════════════════════════════════════════════════════════
     for idx, row in df.iterrows():
 
-        id_noticia  = str(int(row['Id']))
-        titulo      = row['Titulo']
-        porta_vozes = str(row['Porta-vozes iFood'])
-        nota_ifood  = str(row['Nota do iFood'])
+        id_noticia = str(int(row['Id']))
+        titulo     = row['Titulo']
 
         log(f"[{timestamp_sp()}] | ID: {id_noticia} | Título: {titulo}")
 
@@ -326,38 +332,38 @@ def run_bot(df: pd.DataFrame, log_box, usuario: str, senha: str, campo_id_map: d
             if pd.isna(valor_raw) or str(valor_raw).strip() == '':
                 continue
 
-            valor_campo  = str(valor_raw).strip()
-            id_input     = id_elemento + '-input'
+            valor_campo = str(valor_raw).strip()
+            id_input    = id_elemento + '-input'
+            valor_js    = json.dumps(valor_campo)
 
             safe_click(webBot, id_elemento, By.ID, 5000,
                        ensure_visible=True, ensure_clickable=True)
             webBot.wait(1000)
 
-            valor_js = json.dumps(valor_campo)
+            # Execução direta (sem setTimeout) para evitar timeout do
+            # renderer quando a janela está em background
             webBot.execute_javascript(f"""
-setTimeout(function() {{
-    var selectOriginal = document.querySelector('select[id="{id_input}"]');
-    if (selectOriginal) {{
-        var valorDesejado = {valor_js};
-        for (var i = 0; i < selectOriginal.options.length; i++) {{
-            if (selectOriginal.options[i].text.includes(valorDesejado)) {{
-                selectOriginal.selectedIndex = i;
-                var evChange = new Event('change', {{ bubbles: true }});
-                selectOriginal.dispatchEvent(evChange);
-                var evInput = new Event('input', {{ bubbles: true }});
-                selectOriginal.dispatchEvent(evInput);
-                if (typeof $(selectOriginal).data('kendoDropDownList') !== 'undefined') {{
-                    $(selectOriginal).data('kendoDropDownList').value(selectOriginal.options[i].value);
-                    $(selectOriginal).data('kendoDropDownList').trigger('change');
-                }}
-                console.log('Selecionado: ' + valorDesejado);
-                break;
+var selectOriginal = document.querySelector('select[id="{id_input}"]');
+if (selectOriginal) {{
+    var valorDesejado = {valor_js};
+    for (var i = 0; i < selectOriginal.options.length; i++) {{
+        if (selectOriginal.options[i].text.includes(valorDesejado)) {{
+            selectOriginal.selectedIndex = i;
+            var evChange = new Event('change', {{ bubbles: true }});
+            selectOriginal.dispatchEvent(evChange);
+            var evInput = new Event('input', {{ bubbles: true }});
+            selectOriginal.dispatchEvent(evInput);
+            if (typeof $(selectOriginal).data('kendoDropDownList') !== 'undefined') {{
+                $(selectOriginal).data('kendoDropDownList').value(selectOriginal.options[i].value);
+                $(selectOriginal).data('kendoDropDownList').trigger('change');
             }}
+            console.log('Selecionado: ' + valorDesejado);
+            break;
         }}
-    }} else {{
-        console.log('Select não encontrado: {id_input}');
     }}
-}}, 1000);
+}} else {{
+    console.log('Select não encontrado: {id_input}');
+}}
 """)
             webBot.wait(5000)
             fechar_dropdowns_abertos(webBot)
@@ -367,6 +373,13 @@ setTimeout(function() {{
             '//*[@id="news-details"]/footer/button[2]',
             By.XPATH, 10000, ensure_visible=True, ensure_clickable=True)
         webBot.wait(5000)
+
+        # Limpeza de sessão a cada 20 registros para evitar acúmulo de
+        # memória no Chrome que degrada a performance ao longo do lote
+        if (idx + 1) % 20 == 0:
+            webBot.driver.execute_script("window.gc && window.gc();")
+            webBot.driver.execute_script("console.clear();")
+            webBot.wait(500)
 
     # ══════════════════════════════════════════════════════════════════════
     elapsed = time.time() - start_time
@@ -409,7 +422,6 @@ if uploaded_file is not None:
         st.warning("⚠️ Preencha o usuário e a senha antes de iniciar.")
     else:
         if st.button("▶ Iniciar Processamento", type="primary"):
-            # Carrega o dicionário do JSON no momento do processamento
             campo_id_map = carregar_campo_id_map()
 
             st.markdown("### 📋 Log de Processamento")
