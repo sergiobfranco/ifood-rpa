@@ -3,13 +3,17 @@ import pandas as pd
 import pytz
 import time
 import json
+import subprocess
+import threading
+import ctypes
+import ctypes.wintypes
+import psutil
 from pathlib import Path
 from datetime import datetime
 from botcity.web.browsers.chrome import default_options
 from webdriver_manager.chrome import ChromeDriverManager
 from botcity.web import *
 from botcity.plugins.excel import *
-from selenium.common.exceptions import ElementClickInterceptedException
 
 # ─────────────────────────────────────────────
 # Carrega o dicionário de campos a partir do JSON externo
@@ -41,7 +45,7 @@ def safe_click(webBot, selector, by, waiting_time=3000, ensure_visible=False, en
     """
     Localiza e clica em um elemento.
     - Faz scroll até o elemento antes de clicar.
-    - Se o clique normal for interceptado, fecha dropdowns e tenta via JS.
+    - Se o clique falhar por qualquer motivo, tenta via JS.
     Retorna True se conseguiu, False se não encontrou.
     """
     el = webBot.find_element(
@@ -82,9 +86,6 @@ def clicar_list_mode(webBot):
 def clicar_dropdown_periodo(webBot):
     """
     Abre o dropdown de período independente do texto exibido.
-    Usa contains() para tolerar classes CSS adicionais e variações de texto.
-    ensure_visible=False para retornar None silenciosamente quando não encontrar.
-    except Exception ampliado para capturar StaleElementReferenceException e outros.
     """
     textos_possiveis = [
         '24 Horas',
@@ -110,7 +111,7 @@ def clicar_dropdown_periodo(webBot):
                 try:
                     webBot.driver.execute_script("arguments[0].click();", el)
                 except Exception:
-                    continue  # elemento ficou stale — tenta o próximo texto
+                    continue
             return True
 
     # Fallback JS
@@ -178,11 +179,14 @@ def selecionar_periodo_ultimo_mes(webBot, log, id_noticia):
 
 
 def buscar_campo_id_noticias(webBot):
-    """Busca o campo de input de ID com até 3 tentativas."""
+    """
+    Busca o campo de input de ID com até 3 tentativas.
+    waiting_time reduzido para 2000 — retorna mais rápido e confia no retry.
+    """
     for tentativa in range(3):
         el = webBot.find_element(
             selector="//div[@class='k-multiselect-wrap k-floatwrap']//input",
-            by=By.XPATH, waiting_time=5000,
+            by=By.XPATH, waiting_time=2000,
             ensure_visible=True, ensure_clickable=True)
         if el is not None:
             return el
@@ -190,16 +194,161 @@ def buscar_campo_id_noticias(webBot):
     return None
 
 
-def run_bot(df: pd.DataFrame, log_box, usuario: str, senha: str, campo_id_map: dict):
-    logs = []
+def get_descendant_chrome_pids(driver_pid: int) -> list:
+    """
+    Usa psutil para buscar recursivamente todos os PIDs de chrome.exe
+    descendentes do chromedriver — muito mais confiável que parsear wmic.
+    """
+    try:
+        parent      = psutil.Process(driver_pid)
+        descendants = parent.children(recursive=True)
+        return [p.pid for p in descendants if 'chrome' in p.name().lower()]
+    except Exception as e:
+        print(f"[MONITOR] Erro psutil: {e}")
+        return []
 
-    def log(msg: str):
-        logs.append(msg)
-        log_box.text('\n'.join(logs))
 
-    start_time = time.time()
+def get_hwnds_by_pid(pid: int) -> list:
+    """
+    Retorna os HWNDs de janelas visíveis associadas a um PID.
+    Filtra apenas janelas visíveis para evitar handles de processos
+    de renderer/GPU do Chrome que não têm janela real.
+    """
+    user32     = ctypes.windll.user32
+    hwnds      = []
+    WS_VISIBLE = 0x10000000
+    WNDENUMPROC = ctypes.WINFUNCTYPE(
+        ctypes.c_bool, ctypes.wintypes.HWND, ctypes.wintypes.LPARAM)
 
-    # ── Login ─────────────────────────────────────────────────────────────
+    def callback(hwnd, lparam):
+        found_pid = ctypes.wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(found_pid))
+        if found_pid.value == lparam:
+            style = user32.GetWindowLongW(hwnd, -16)  # GWL_STYLE
+            if style & WS_VISIBLE:
+                hwnds.append(hwnd)
+        return True
+
+    user32.EnumWindows(WNDENUMPROC(callback), pid)
+    return hwnds
+
+
+def monitorar_janela(webBot: WebBot, stop_event: threading.Event):
+    """
+    Monitora a janela do Chrome via API nativa do Windows (ctypes/psutil).
+    Usa IsIconic() para detectar minimização — não passa pelo WebDriver,
+    portanto não disputa a conexão com o loop principal.
+    Restaura com SW_SHOWNOACTIVATE para não roubar o foco do usuário.
+    """
+    user32            = ctypes.windll.user32
+    SW_SHOWNOACTIVATE = 4
+    SWP_SHOWWINDOW    = 0x0040
+
+    chrome_pids = []
+    try:
+        driver_pid  = webBot.driver.service.process.pid
+        chrome_pids = get_descendant_chrome_pids(driver_pid)
+        print(f"[MONITOR] driver_pid={driver_pid}, chrome_pids={chrome_pids}")
+    except Exception as e:
+        print(f"[MONITOR] Erro ao obter PIDs: {e}")
+
+    while not stop_event.is_set():
+        try:
+            for pid in chrome_pids:
+                for hwnd in get_hwnds_by_pid(pid):
+                    if user32.IsIconic(hwnd):
+                        user32.ShowWindow(hwnd, SW_SHOWNOACTIVATE)
+                        user32.SetWindowPos(hwnd, 0, 0, 0, 800, 600,
+                                            SWP_SHOWWINDOW)
+        except Exception:
+            pass
+        time.sleep(2)
+
+
+def limpar_processos_chrome():
+    """
+    Mata processos Chrome remanescentes de sessões anteriores do WebDriver.
+    Estratégia cirúrgica: encontra todos os chromedriver.exe em execução,
+    localiza os processos chrome.exe filhos deles via wmic, e mata apenas
+    esses — sem tocar em janelas do Chrome abertas pelo usuário.
+    """
+    try:
+        result = subprocess.run(
+            ['wmic', 'process', 'where', 'name="chromedriver.exe"', 'get', 'ProcessId'],
+            capture_output=True, text=True
+        )
+        driver_pids = []
+        for line in result.stdout.splitlines():
+            line = line.strip()
+            if line.isdigit():
+                driver_pids.append(line)
+
+        for driver_pid in driver_pids:
+            child_result = subprocess.run(
+                ['wmic', 'process', 'where', f'ParentProcessId={driver_pid}',
+                 'get', 'ProcessId'],
+                capture_output=True, text=True
+            )
+            for line in child_result.stdout.splitlines():
+                line = line.strip()
+                if line.isdigit():
+                    subprocess.run(['taskkill', '/F', '/PID', line],
+                                   capture_output=True)
+
+        for driver_pid in driver_pids:
+            subprocess.run(['taskkill', '/F', '/PID', driver_pid],
+                           capture_output=True)
+
+    except Exception:
+        pass
+
+    time.sleep(2)
+
+
+def encerrar_sessao(webBot: WebBot):
+    """
+    Encerra a sessão do Chrome de forma segura, matando apenas
+    o processo Chrome iniciado pelo WebDriver (via PID).
+    Não afeta outras janelas do Chrome abertas no sistema.
+    """
+    pids = []
+    try:
+        driver_pid = webBot.driver.service.process.pid
+        pids.append(driver_pid)
+
+        result = subprocess.run(
+            ['wmic', 'process', 'where', f'ParentProcessId={driver_pid}',
+             'get', 'ProcessId'],
+            capture_output=True, text=True
+        )
+        for line in result.stdout.splitlines():
+            line = line.strip()
+            if line.isdigit():
+                pids.append(int(line))
+    except Exception:
+        pass
+
+    try:
+        webBot.stop_browser()
+    except Exception:
+        pass
+
+    for pid in pids:
+        try:
+            subprocess.run(['taskkill', '/F', '/PID', str(pid)],
+                           capture_output=True)
+        except Exception:
+            pass
+
+    time.sleep(2)
+
+
+def iniciar_sessao(usuario: str, senha: str) -> WebBot:
+    """
+    Abre o Chrome em tamanho reduzido no canto superior esquerdo da tela.
+    Assim a janela fica visível (sem throttling) mas fora do caminho,
+    permitindo trabalhar normalmente em outras janelas por cima.
+    """
     webDriverPath = ChromeDriverManager().install()
     webBot = WebBot()
     webBot.driver_path = webDriverPath
@@ -207,10 +356,21 @@ def run_bot(df: pd.DataFrame, log_box, usuario: str, senha: str, campo_id_map: d
     webBot.headless = False
     webBotDef_options = default_options()
     webBotDef_options.add_argument("--page-load-strategy=Normal")
+
+    # Flags anti-throttling para quando a janela está sem foco
+    webBotDef_options.add_argument("--disable-background-timer-throttling")
+    webBotDef_options.add_argument("--disable-renderer-backgrounding")
+    webBotDef_options.add_argument("--disable-backgrounding-occluded-windows")
+    webBotDef_options.add_argument("--disable-features=CalculateNativeWinOcclusion")
+
     webBot.options = webBotDef_options
     webBot.browse("https://mvc.boxnet.com.br/Autenticacao/Login?ReturnUrl=%2f")
 
-    webBot.maximize_window()
+    # Redimensiona e posiciona após o browser abrir — garante que
+    # sobrescreve qualquer configuração padrão do BotCity
+    webBot.driver.set_window_size(800, 600)
+    webBot.driver.set_window_position(0, 0)
+
     webBot.driver.execute_script("document.body.style.zoom='80%'")
     webBot.wait(5000)
 
@@ -225,11 +385,11 @@ def run_bot(df: pd.DataFrame, log_box, usuario: str, senha: str, campo_id_map: d
     ).send_keys(senha)
 
     safe_click(webBot, "/html/body/div/div/form/div[2]/div/button", By.XPATH, 1000)
-    webBot.wait(3000)
+    webBot.wait(2000)
     webBot.driver.execute_script("document.body.style.zoom='80%'")
     webBot.wait(500)
 
-    # ── Seleciona MVC iFood ───────────────────────────────────────────────
+    # Seleciona MVC iFood
     safe_click(webBot,
         '//*[@id="headerTodo"]/div/header/div/ul[2]/li[1]/a/div[2]/span',
         By.XPATH, 5000)
@@ -246,14 +406,56 @@ def run_bot(df: pd.DataFrame, log_box, usuario: str, senha: str, campo_id_map: d
     webBot.driver.execute_script("document.body.style.zoom='80%'")
     webBot.wait(500)
 
-    # ── Modo Lista ────────────────────────────────────────────────────────
+    # Modo Lista
     clicar_list_mode(webBot)
     webBot.wait(3000)
+
+    return webBot
+
+
+def iniciar_monitor(webBot: WebBot) -> tuple:
+    """Inicia a thread de monitoramento de janela. Retorna (stop_event, thread)."""
+    stop_monitor = threading.Event()
+    monitor_thread = threading.Thread(
+        target=monitorar_janela,
+        args=(webBot, stop_monitor),
+        daemon=True
+    )
+    monitor_thread.start()
+    return stop_monitor, monitor_thread
+
+
+def run_bot(df: pd.DataFrame, log_box, usuario: str, senha: str, campo_id_map: dict):
+    logs = []
+
+    def log(msg: str):
+        logs.append(msg)
+        log_box.text('\n'.join(logs))
+
+    start_time = time.time()
+    REINICIAR_A_CADA = 20
+
+    # ── Limpa processos Chrome remanescentes de sessões anteriores ────────
+    log(f"  🧹 [{timestamp_sp()}] | Limpando processos anteriores do WebDriver...")
+    limpar_processos_chrome()
+
+    # ── Inicia a primeira sessão e monitor ────────────────────────────────
+    webBot = iniciar_sessao(usuario, senha)
+    stop_monitor, _ = iniciar_monitor(webBot)
 
     # ══════════════════════════════════════════════════════════════════════
     # LOOP PRINCIPAL
     # ══════════════════════════════════════════════════════════════════════
     for idx, row in df.iterrows():
+
+        # ── Reinicia o Chrome a cada N registros ──────────────────────────
+        if idx > 0 and idx % REINICIAR_A_CADA == 0:
+            log(f"  🔄 [{timestamp_sp()}] | Reiniciando sessão do Chrome ({idx} registros processados)...")
+            stop_monitor.set()
+            encerrar_sessao(webBot)
+            webBot = iniciar_sessao(usuario, senha)
+            stop_monitor, _ = iniciar_monitor(webBot)
+            log(f"  ✅ [{timestamp_sp()}] | Sessão reiniciada — continuando.")
 
         id_noticia = str(int(row['Id']))
         titulo     = row['Titulo']
@@ -274,7 +476,7 @@ def run_bot(df: pd.DataFrame, log_box, usuario: str, senha: str, campo_id_map: d
                 var spId = document.getElementById('spIdNoticia');
                 if (spId) spId.click();
             """)
-            webBot.wait(600)
+            webBot.wait(400)
             campoBuscaIDnoticias = buscar_campo_id_noticias(webBot)
 
         if campoBuscaIDnoticias is None:
@@ -298,7 +500,7 @@ def run_bot(df: pd.DataFrame, log_box, usuario: str, senha: str, campo_id_map: d
         if not selecionou:
             log(f"  ❌ [{timestamp_sp()}] | ID: {id_noticia} | Não foi possível selecionar 'Último mês' — pulando.")
             continue
-        webBot.wait(1000)
+        webBot.wait(500)
 
         # ── Refresh ───────────────────────────────────────────────────────
         safe_click(webBot, "refresh-results", By.ID, 1000)
@@ -320,14 +522,13 @@ def run_bot(df: pd.DataFrame, log_box, usuario: str, senha: str, campo_id_map: d
 
         # ── Menu Opções Adicionais ────────────────────────────────────────
         safe_click(webBot, "aditional-options", By.ID, 1000)
-        webBot.wait(5000)
+        webBot.wait(3000)
 
         # ── Itera sobre os campos do dicionário carregado do JSON ─────────
         for nome_coluna, id_elemento in campo_id_map.items():
             if nome_coluna not in row.index:
                 continue
 
-            # Pula o campo se estiver vazio na planilha
             valor_raw = row[nome_coluna]
             if pd.isna(valor_raw) or str(valor_raw).strip() == '':
                 continue
@@ -340,8 +541,6 @@ def run_bot(df: pd.DataFrame, log_box, usuario: str, senha: str, campo_id_map: d
                        ensure_visible=True, ensure_clickable=True)
             webBot.wait(1000)
 
-            # Execução direta (sem setTimeout) para evitar timeout do
-            # renderer quando a janela está em background
             webBot.execute_javascript(f"""
 var selectOriginal = document.querySelector('select[id="{id_input}"]');
 if (selectOriginal) {{
@@ -374,14 +573,10 @@ if (selectOriginal) {{
             By.XPATH, 10000, ensure_visible=True, ensure_clickable=True)
         webBot.wait(5000)
 
-        # Limpeza de sessão a cada 20 registros para evitar acúmulo de
-        # memória no Chrome que degrada a performance ao longo do lote
-        if (idx + 1) % 20 == 0:
-            webBot.driver.execute_script("window.gc && window.gc();")
-            webBot.driver.execute_script("console.clear();")
-            webBot.wait(500)
+    # ── Encerra monitor e sessão final ────────────────────────────────────
+    stop_monitor.set()
+    encerrar_sessao(webBot)
 
-    # ══════════════════════════════════════════════════════════════════════
     elapsed = time.time() - start_time
     return elapsed
 
