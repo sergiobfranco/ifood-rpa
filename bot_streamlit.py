@@ -3,7 +3,6 @@ import pandas as pd
 import pytz
 import time
 import json
-import subprocess
 import os
 import psutil
 from pathlib import Path
@@ -188,23 +187,11 @@ def buscar_campo_id_noticias(webBot):
     return None
 
 
-def limpar_processos_chrome():
-    """Mata processos Chrome/Chromium remanescentes usando psutil."""
-    try:
-        for proc in psutil.process_iter(['name', 'pid']):
-            try:
-                name = proc.info['name'].lower()
-                if 'chrom' in name:
-                    proc.kill()
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
-                pass
-    except Exception:
-        pass
-    time.sleep(2)
-
-
 def encerrar_sessao(webBot: WebBot):
-    """Encerra a sessão do Chrome usando psutil."""
+    """
+    Encerra apenas a sessão Chrome desta instância, via PID específico.
+    Não afeta sessões de outros usuários.
+    """
     pids = []
     try:
         driver_pid = webBot.driver.service.process.pid
@@ -307,9 +294,7 @@ def run_bot(df: pd.DataFrame, log_box, usuario: str, senha: str, campo_id_map: d
     start_time = time.time()
     REINICIAR_A_CADA = 20
 
-    log(f"  🧹 [{timestamp_sp()}] | Limpando processos anteriores do WebDriver...")
-    limpar_processos_chrome()
-
+    # Cada usuário inicia sua própria sessão isolada — sem limpeza global
     webBot = iniciar_sessao(usuario, senha)
 
     for idx, row in df.iterrows():
@@ -325,7 +310,6 @@ def run_bot(df: pd.DataFrame, log_box, usuario: str, senha: str, campo_id_map: d
 
         log(f"[{timestamp_sp()}] | ID: {id_noticia} | Título: {titulo}")
 
-        # Descarta alertas pendentes antes de cada registro
         descartar_alerta(webBot)
 
         webBot.driver.execute_script("""
@@ -381,11 +365,10 @@ def run_bot(df: pd.DataFrame, log_box, usuario: str, senha: str, campo_id_map: d
         tituloNoticia.click()
         webBot.wait(2000)
 
-        # ── Menu Opções Adicionais ────────────────────────────────────────
         descartar_alerta(webBot)
         safe_click(webBot, "aditional-options", By.ID, 1000)
         webBot.wait(3000)
-        descartar_alerta(webBot)  # descarta se o carregamento falhou
+        descartar_alerta(webBot)
 
         for nome_coluna, id_elemento in campo_id_map.items():
             if nome_coluna not in row.index:
