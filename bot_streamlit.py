@@ -57,6 +57,65 @@ def fechar_dropdowns_abertos(webBot):
     webBot.wait(300)
 
 
+def selecionar_liberada_para_mvc(webBot, log, id_noticia):
+    """
+    Abre o dropdown 'release-news' e seleciona a opção 'Liberada para MVC'.
+    Tenta até 3 vezes com wait crescente.
+    """
+    XPATH_DROPDOWN = '//*[@id="release-news"]/span/span/span[1]'
+    OPCAO          = 'Liberada para MVC'
+
+    for tentativa in range(1, 4):
+        # Abre o dropdown
+        abriu = safe_click(webBot, XPATH_DROPDOWN, By.XPATH,
+                           waiting_time=5000,
+                           ensure_visible=True, ensure_clickable=True)
+        if not abriu:
+            log(f"  ⚠️  [{timestamp_sp()}] | ID: {id_noticia} | Tentativa {tentativa}: dropdown 'Liberada para MVC' não abriu.")
+            webBot.wait(1000 * tentativa)
+            continue
+
+        webBot.wait(1000)
+
+        # Busca a opção na lista
+        el = webBot.find_element(
+            selector=f"//li[contains(normalize-space(text()),'{OPCAO}')]",
+            by=By.XPATH, waiting_time=2000,
+            ensure_visible=False, ensure_clickable=False
+        )
+        if el is not None:
+            try:
+                el.click()
+            except Exception:
+                try:
+                    webBot.driver.execute_script("arguments[0].click();", el)
+                except Exception:
+                    pass
+            webBot.wait(500)
+            return True
+
+        # Fallback JS
+        result = webBot.driver.execute_script(f"""
+            var items = document.querySelectorAll('.k-list .k-item, ul.k-list-container li');
+            for (var i = 0; i < items.length; i++) {{
+                if (items[i].textContent.includes('{OPCAO}')) {{
+                    items[i].click();
+                    return true;
+                }}
+            }}
+            return false;
+        """)
+        if result:
+            webBot.wait(500)
+            return True
+
+        log(f"  ⚠️  [{timestamp_sp()}] | ID: {id_noticia} | Tentativa {tentativa}: opção '{OPCAO}' não encontrada na lista.")
+        webBot.wait(1000 * tentativa)
+
+    log(f"  ❌ [{timestamp_sp()}] | ID: {id_noticia} | Não foi possível selecionar '{OPCAO}' — continuando sem selecionar.")
+    return False
+
+
 def safe_click(webBot, selector, by, waiting_time=3000, ensure_visible=False, ensure_clickable=False):
     descartar_alerta(webBot)
     el = webBot.find_element(
@@ -413,6 +472,11 @@ if (selectOriginal) {{
             webBot.wait(5000)
             fechar_dropdowns_abertos(webBot)
 
+        # ── Seleciona "Liberada para MVC" ────────────────────────────────
+        descartar_alerta(webBot)
+        selecionar_liberada_para_mvc(webBot, log, id_noticia)
+
+        # ── Salva e fecha ─────────────────────────────────────────────────
         descartar_alerta(webBot)
         safe_click(webBot,
             '//*[@id="news-details"]/footer/button[2]',
