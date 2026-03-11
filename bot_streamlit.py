@@ -116,6 +116,29 @@ def selecionar_liberada_para_mvc(webBot, log, id_noticia):
     return False
 
 
+def recuperar_estado(webBot, log, id_noticia):
+    """
+    Tenta recuperar o estado da página quando algo falha durante o processamento
+    de uma notícia — fecha modais abertos via Escape e navega de volta à listagem.
+    Evita que falhas num registro contaminem os registros seguintes.
+    """
+    log(f"  🔁 [{timestamp_sp()}] | ID: {id_noticia} | Recuperando estado da página...")
+    try:
+        # Descarta alertas pendentes
+        descartar_alerta(webBot)
+        # Pressiona Escape para fechar modais/overlays
+        webBot.driver.find_element(By.TAG_NAME, 'body').send_keys('\ue00c')
+        webBot.wait(1000)
+        descartar_alerta(webBot)
+        # Navega de volta para a listagem do MVC
+        webBot.driver.get("https://mvc.boxnet.com.br/")
+        webBot.wait(3000)
+        webBot.driver.execute_script("document.body.style.zoom='80%'")
+        webBot.wait(500)
+    except Exception as e:
+        log(f"  ⚠️  [{timestamp_sp()}] | ID: {id_noticia} | Erro na recuperação: {e}")
+
+
 def safe_click(webBot, selector, by, waiting_time=3000, ensure_visible=False, ensure_clickable=False):
     descartar_alerta(webBot)
     el = webBot.find_element(
@@ -190,7 +213,7 @@ def clicar_dropdown_periodo(webBot):
     return bool(result)
 
 
-def selecionar_periodo_ultimo_mes(webBot, log, id_noticia):
+def selecionar_periodo_ultimo_ano(webBot, log, id_noticia):
     for tentativa in range(1, 4):
         abriu = clicar_dropdown_periodo(webBot)
         if not abriu:
@@ -201,7 +224,7 @@ def selecionar_periodo_ultimo_mes(webBot, log, id_noticia):
         webBot.wait(1000)
 
         el = webBot.find_element(
-            selector="//li[contains(normalize-space(text()), 'Último mês') or contains(normalize-space(text()), 'ltimo m')]",
+            selector="//li[contains(normalize-space(text()), 'Último ano') or contains(normalize-space(text()), 'ltimo ano')]",
             by=By.XPATH, waiting_time=2000,
             ensure_visible=False, ensure_clickable=False
         )
@@ -218,7 +241,7 @@ def selecionar_periodo_ultimo_mes(webBot, log, id_noticia):
         result = webBot.driver.execute_script("""
             var items = document.querySelectorAll('.k-list .k-item, ul.k-list-container li');
             for (var i = 0; i < items.length; i++) {
-                if (items[i].textContent.toLowerCase().includes('ltimo m')) {
+                if (items[i].textContent.toLowerCase().includes('ltimo ano')) {
                     items[i].click();
                     return true;
                 }
@@ -228,7 +251,7 @@ def selecionar_periodo_ultimo_mes(webBot, log, id_noticia):
         if result:
             return True
 
-        log(f"  ⚠️  [{timestamp_sp()}] | ID: {id_noticia} | Tentativa {tentativa}: opção 'Último mês' não encontrada.")
+        log(f"  ⚠️  [{timestamp_sp()}] | ID: {id_noticia} | Tentativa {tentativa}: opção 'Último ano' não encontrada.")
         webBot.wait(1000 * tentativa)
 
     return False
@@ -364,7 +387,12 @@ def run_bot(df: pd.DataFrame, log_box, usuario: str, senha: str, campo_id_map: d
             webBot = iniciar_sessao(usuario, senha)
             log(f"  ✅ [{timestamp_sp()}] | Sessão reiniciada — continuando.")
 
-        id_noticia = str(int(row['Id']))
+        # Localiza a coluna de ID de forma case-insensitive
+        col_id = next((c for c in df.columns if c.strip().lower() == 'id'), None)
+        if col_id is None:
+            log(f"  ❌ [{timestamp_sp()}] | Coluna 'Id' não encontrada no arquivo. Colunas disponíveis: {list(df.columns)}")
+            break
+        id_noticia = str(int(row[col_id]))
         titulo     = row['Titulo']
 
         log(f"[{timestamp_sp()}] | ID: {id_noticia} | Título: {titulo}")
@@ -390,7 +418,13 @@ def run_bot(df: pd.DataFrame, log_box, usuario: str, senha: str, campo_id_map: d
             log(f"  ❌ [{timestamp_sp()}] | ID: {id_noticia} | Campo de ID não abriu — pulando.")
             continue
 
-        campoBuscaIDnoticias.click()
+        try:
+            campoBuscaIDnoticias.click()
+        except Exception:
+            try:
+                webBot.driver.execute_script("arguments[0].click();", campoBuscaIDnoticias)
+            except Exception:
+                pass
         webBot.wait(300)
         campoBuscaIDnoticias = buscar_campo_id_noticias(webBot)
         if campoBuscaIDnoticias is None:
@@ -402,9 +436,9 @@ def run_bot(df: pd.DataFrame, log_box, usuario: str, senha: str, campo_id_map: d
         webBot.key_enter(wait=0)
         webBot.wait(500)
 
-        selecionou = selecionar_periodo_ultimo_mes(webBot, log, id_noticia)
+        selecionou = selecionar_periodo_ultimo_ano(webBot, log, id_noticia)
         if not selecionou:
-            log(f"  ❌ [{timestamp_sp()}] | ID: {id_noticia} | Não foi possível selecionar 'Último mês' — pulando.")
+            log(f"  ❌ [{timestamp_sp()}] | ID: {id_noticia} | Não foi possível selecionar 'Último ano' — pulando.")
             continue
         webBot.wait(500)
 
@@ -474,7 +508,10 @@ if (selectOriginal) {{
 
         # ── Seleciona "Liberada para MVC" ────────────────────────────────
         descartar_alerta(webBot)
-        selecionar_liberada_para_mvc(webBot, log, id_noticia)
+        selecionou_liberada = selecionar_liberada_para_mvc(webBot, log, id_noticia)
+        if not selecionou_liberada:
+            recuperar_estado(webBot, log, id_noticia)
+            continue
 
         # ── Salva e fecha ─────────────────────────────────────────────────
         descartar_alerta(webBot)
@@ -515,6 +552,8 @@ uploaded_file = st.file_uploader(
 
 if uploaded_file is not None:
     df = pd.read_excel(uploaded_file, sheet_name="Sheet1")
+    # Normaliza nomes de colunas — remove espaços extras e mantém capitalização original
+    df.columns = df.columns.str.strip()
     st.success(f"✅ Arquivo carregado com **{len(df)} registros**.")
     st.dataframe(df, use_container_width=True)
     st.markdown("---")
