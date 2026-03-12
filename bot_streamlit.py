@@ -351,7 +351,9 @@ def iniciar_sessao(usuario: str, senha: str) -> WebBot:
 
     campoPesquisaMVC = webBot.find_element(
         selector="txtPesquisarMvc", by=By.ID,
-        waiting_time=5000, ensure_visible=True, ensure_clickable=False)
+        waiting_time=10000, ensure_visible=True, ensure_clickable=False)
+    if campoPesquisaMVC is None:
+        raise RuntimeError("Campo de pesquisa do MVC não encontrado — verifique se o login foi bem sucedido.")
     campoPesquisaMVC.send_keys("IFOOD - BOXNET")
 
     safe_click(webBot, "//a[contains(text(), 'IFOOD - BOXNET')]", By.XPATH, 10000,
