@@ -323,6 +323,14 @@ def iniciar_sessao(usuario: str, senha: str) -> WebBot:
     webBotDef_options.add_argument("--disable-renderer-backgrounding")
     webBotDef_options.add_argument("--disable-backgrounding-occluded-windows")
 
+    # ── Desabilita popup de salvar senha ──────────────────────────────────
+    webBotDef_options.add_argument("--disable-save-password-bubble")
+    webBotDef_options.add_experimental_option("prefs", {
+        "credentials_enable_service": False,
+        "profile.password_manager_enabled": False,
+        "profile.default_content_setting_values.notifications": 2,
+    })
+
     webBot.options = webBotDef_options
     webBot.browse("https://mvc.boxnet.com.br/Autenticacao/Login?ReturnUrl=%2f")
 
