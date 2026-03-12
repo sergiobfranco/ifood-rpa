@@ -59,57 +59,42 @@ def fechar_dropdowns_abertos(webBot):
 
 def selecionar_liberada_para_mvc(webBot, log, id_noticia):
     """
-    Abre o dropdown 'release-news' e seleciona a opção 'Liberada para MVC'.
-    Tenta até 3 vezes com wait crescente.
+    Seleciona 'Liberada para MVC' no dropdown release-news via JS direto
+    no <select> oculto (release-news-select), igual aos campos de Opções
+    Adicionais. Funciona mesmo quando o valor já está preenchido.
     """
-    XPATH_DROPDOWN = '//*[@id="release-news"]/span/span/span[1]'
-    OPCAO          = 'Liberada para MVC'
+    OPCAO     = 'Liberada para MVC'
+    SELECT_ID = 'release-news-select'
 
     for tentativa in range(1, 4):
-        # Abre o dropdown
-        abriu = safe_click(webBot, XPATH_DROPDOWN, By.XPATH,
-                           waiting_time=5000,
-                           ensure_visible=True, ensure_clickable=True)
-        if not abriu:
-            log(f"  ⚠️  [{timestamp_sp()}] | ID: {id_noticia} | Tentativa {tentativa}: dropdown 'Liberada para MVC' não abriu.")
-            webBot.wait(1000 * tentativa)
-            continue
-
-        webBot.wait(1000)
-
-        # Busca a opção na lista
-        el = webBot.find_element(
-            selector=f"//li[contains(normalize-space(text()),'{OPCAO}')]",
-            by=By.XPATH, waiting_time=2000,
-            ensure_visible=False, ensure_clickable=False
-        )
-        if el is not None:
-            try:
-                el.click()
-            except Exception:
-                try:
-                    webBot.driver.execute_script("arguments[0].click();", el)
-                except Exception:
-                    pass
-            webBot.wait(500)
-            return True
-
-        # Fallback JS
         result = webBot.driver.execute_script(f"""
-            var items = document.querySelectorAll('.k-list .k-item, ul.k-list-container li');
-            for (var i = 0; i < items.length; i++) {{
-                if (items[i].textContent.includes('{OPCAO}')) {{
-                    items[i].click();
-                    return true;
+            var sel = document.getElementById('{SELECT_ID}');
+            if (!sel) return 'not_found';
+            var valorDesejado = '{OPCAO}';
+            for (var i = 0; i < sel.options.length; i++) {{
+                if (sel.options[i].text.includes(valorDesejado)) {{
+                    sel.selectedIndex = i;
+                    sel.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                    sel.dispatchEvent(new Event('input',  {{ bubbles: true }}));
+                    var kendo = $(sel).data('kendoDropDownList');
+                    if (kendo) {{
+                        kendo.value(sel.options[i].value);
+                        kendo.trigger('change');
+                    }}
+                    return 'ok';
                 }}
             }}
-            return false;
+            return 'option_not_found';
         """)
-        if result:
+
+        if result == 'ok':
             webBot.wait(500)
             return True
+        elif result == 'not_found':
+            log(f"  ⚠️  [{timestamp_sp()}] | ID: {id_noticia} | Tentativa {tentativa}: select '{SELECT_ID}' não encontrado no DOM.")
+        else:
+            log(f"  ⚠️  [{timestamp_sp()}] | ID: {id_noticia} | Tentativa {tentativa}: opção '{OPCAO}' não encontrada nas options.")
 
-        log(f"  ⚠️  [{timestamp_sp()}] | ID: {id_noticia} | Tentativa {tentativa}: opção '{OPCAO}' não encontrada na lista.")
         webBot.wait(1000 * tentativa)
 
     log(f"  ❌ [{timestamp_sp()}] | ID: {id_noticia} | Não foi possível selecionar '{OPCAO}' — continuando sem selecionar.")
