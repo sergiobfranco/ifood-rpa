@@ -308,13 +308,13 @@ def iniciar_sessao(usuario: str, senha: str) -> WebBot:
     webBotDef_options.add_argument("--disable-renderer-backgrounding")
     webBotDef_options.add_argument("--disable-backgrounding-occluded-windows")
 
-    # ── Desabilita popup de salvar senha ──────────────────────────────────
+    # ── Desabilita popup de salvar senha via flags diretas ─────────────────
+    # Usamos argumentos diretos em vez de experimental_option/prefs pois o
+    # default_options() do BotCity pode sobrescrever as prefs.
     webBotDef_options.add_argument("--disable-save-password-bubble")
-    webBotDef_options.add_experimental_option("prefs", {
-        "credentials_enable_service": False,
-        "profile.password_manager_enabled": False,
-        "profile.default_content_setting_values.notifications": 2,
-    })
+    webBotDef_options.add_argument("--disable-features=PasswordManager")
+    webBotDef_options.add_argument("--password-store=basic")
+    webBotDef_options.add_argument("--use-mock-keychain")
 
     webBot.options = webBotDef_options
     webBot.browse("https://mvc.boxnet.com.br/Autenticacao/Login?ReturnUrl=%2f")
