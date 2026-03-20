@@ -118,7 +118,7 @@ def recuperar_estado(webBot, log, id_noticia):
         # Navega de volta para a listagem do MVC
         webBot.driver.get("https://mvc.boxnet.com.br/")
         webBot.wait(3000)
-        webBot.driver.execute_script("document.body.style.zoom='80%'")
+        webBot.driver.execute_script("if(document.body) document.body.style.zoom='80%'")
         webBot.wait(500)
     except Exception as e:
         log(f"  ⚠️  [{timestamp_sp()}] | ID: {id_noticia} | Erro na recuperação: {e}")
@@ -319,7 +319,7 @@ def iniciar_sessao(usuario: str, senha: str) -> WebBot:
     webBot.options = webBotDef_options
     webBot.browse("https://mvc.boxnet.com.br/Autenticacao/Login?ReturnUrl=%2f")
 
-    webBot.driver.execute_script("document.body.style.zoom='80%'")
+    webBot.driver.execute_script("if(document.body) document.body.style.zoom='80%'")
     webBot.wait(5000)
 
     webBot.find_element(
@@ -334,7 +334,7 @@ def iniciar_sessao(usuario: str, senha: str) -> WebBot:
 
     safe_click(webBot, "/html/body/div/div/form/div[2]/div/button", By.XPATH, 1000)
     webBot.wait(2000)
-    webBot.driver.execute_script("document.body.style.zoom='80%'")
+    webBot.driver.execute_script("if(document.body) document.body.style.zoom='80%'")
     webBot.wait(500)
 
     safe_click(webBot,
@@ -352,7 +352,7 @@ def iniciar_sessao(usuario: str, senha: str) -> WebBot:
     safe_click(webBot, "//a[contains(text(), 'IFOOD - BOXNET')]", By.XPATH, 10000,
                ensure_visible=True)
     webBot.wait(3000)
-    webBot.driver.execute_script("document.body.style.zoom='80%'")
+    webBot.driver.execute_script("if(document.body) document.body.style.zoom='80%'")
     webBot.wait(500)
 
     clicar_list_mode(webBot)
